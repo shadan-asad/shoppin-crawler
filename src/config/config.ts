@@ -1,20 +1,17 @@
-/**
- * Configuration settings for the crawler
- */
 export interface CrawlerConfig {
-  /** Maximum number of concurrent requests */
+  //Maximum number of concurrent requests
   concurrency: number;
-  /** Maximum depth to crawl */
+  // Maximum depth to crawl
   maxDepth: number;
-  /** Delay between requests in milliseconds */
+  // Delay between requests in milliseconds
   requestDelay: number;
-  /** User agent to use for requests */
+  // User agent to use for requests
   userAgent: string;
-  /** Timeout for requests in milliseconds */
+  // Timeout for requests in milliseconds
   timeout: number;
-  /** Output file path */
+  // Output file path
   outputPath: string;
-  /** Whether to use headless browser */
+  // Whether to use headless browser
   useHeadlessBrowser: boolean;
 }
 
