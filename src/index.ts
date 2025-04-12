@@ -10,10 +10,15 @@ class EcommerceCrawler extends BaseCrawler {
     // Use common patterns from url-utils
     this.productUrlPatterns = [...commonProductUrlPatterns];
 
-    // Add any domain-specific patterns here if needed
-    // Example: Adding a specific pattern for a domain
-    if (this.domain.includes('example.com')) {
-      this.productUrlPatterns.push({ pattern: /\/example-product\//, description: 'Example domain product URL' });
+    // Add domain-specific patterns
+    if (this.domain.includes('tatacliq.com')) {
+      this.productUrlPatterns.push({ pattern: /\/product\//, description: 'TataCliq product URL' });
+    }
+    if (this.domain.includes('nykaafashion.com')) {
+      this.productUrlPatterns.push({ pattern: /\/p\//, description: 'Nykaa Fashion product URL' });
+    }
+    if (this.domain.includes('westside.com')) {
+      this.productUrlPatterns.push({ pattern: /\/shop\//, description: 'Westside product URL' });
     }
   }
 }

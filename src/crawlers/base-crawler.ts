@@ -14,9 +14,7 @@ import {
 import fs from 'fs';
 import path from 'path';
 
-/**
- * Base crawler class that provides common functionality for all crawlers
- */
+
 export abstract class BaseCrawler {
   protected domain: string;
   protected config: CrawlerConfig;
@@ -28,11 +26,7 @@ export abstract class BaseCrawler {
   protected startTime: Date | null = null;
   protected endTime: Date | null = null;
 
-  /**
-   * Creates a new BaseCrawler instance
-   * @param domain The domain to crawl
-   * @param config The crawler configuration
-   */
+  
   constructor(domain: string, config: CrawlerConfig = defaultConfig) {
     this.domain = domain;
     this.config = config;
@@ -47,20 +41,11 @@ export abstract class BaseCrawler {
    */
   protected abstract initializeProductUrlPatterns(): void;
 
-  /**
-   * Checks if a URL is a product URL
-   * @param url The URL to check
-   * @returns True if the URL is a product URL
-   */
   protected isProductUrl(url: string): boolean {
     // Check against all patterns
     return this.productUrlPatterns.some(({ pattern }) => pattern.test(url));
   }
 
-  /**
-   * Starts the crawler
-   * @returns A promise that resolves to the crawl result
-   */
   public async start(): Promise<CrawlResult> {
     this.startTime = new Date();
     logger.info(`Starting crawler for domain: ${this.domain}`);
@@ -93,52 +78,38 @@ export abstract class BaseCrawler {
     }
   }
 
-  /**
-   * Processes the URL queue
-   */
+  
   private async processQueue(): Promise<void> {
-    // Create an array to hold promises for concurrent processing
     const promises: Promise<void>[] = [];
-    
-    // Process the queue until it's empty
-    while (this.urlQueue.length > 0) {
-      // Get the next batch of URLs to process
+    const maxUrlsToCrawl = 200; // Set the maximum number of URLs to crawl
+
+    while (this.urlQueue.length > 0 && this.visitedUrls.size < maxUrlsToCrawl) {
       const batch = this.urlQueue.splice(0, this.config.concurrency);
-      
-      // Process each URL in the batch
+
       for (const item of batch) {
-        // Skip if we've already visited this URL
         const normalizedUrl = normalizeUrl(item.url);
         if (this.visitedUrls.has(normalizedUrl)) {
           continue;
         }
-        
-        // Mark as visited
+
         this.visitedUrls.add(normalizedUrl);
-        
-        // Process the URL
+
         const promise = this.processUrl(item).catch(error => {
           logger.error(`Error processing URL ${item.url}: ${error.message}`);
         });
-        
+
         promises.push(promise);
       }
-      
-      // Wait for all promises to resolve
+
       await Promise.all(promises);
       promises.length = 0;
-      
-      // Add a delay between batches
+
       if (this.urlQueue.length > 0 && this.config.requestDelay > 0) {
         await new Promise(resolve => setTimeout(resolve, this.config.requestDelay));
       }
     }
   }
 
-  /**
-   * Processes a single URL
-   * @param item The queue item to process
-   */
   private async processUrl(item: CrawlQueueItem): Promise<void> {
     const { url, depth } = item;
     
@@ -148,6 +119,8 @@ export abstract class BaseCrawler {
     if (this.isProductUrl(url)) {
       logger.info(`Found product URL: ${url}`);
       this.productUrls.add(url);
+    } else {
+      logger.debug(`Not a product URL: ${url}`);
     }
     
     // Stop if we've reached the maximum depth
@@ -191,11 +164,7 @@ export abstract class BaseCrawler {
     }
   }
 
-  /**
-   * Fetches links from a page using Axios and Cheerio
-   * @param url The URL to fetch
-   * @returns An array of links found on the page
-   */
+  
   private async fetchLinksWithAxios(url: string): Promise<string[]> {
     try {
       const response = await axios.get(url, {
@@ -223,11 +192,7 @@ export abstract class BaseCrawler {
     }
   }
 
-  /**
-   * Fetches links from a page using Puppeteer
-   * @param url The URL to fetch
-   * @returns An array of links found on the page
-   */
+  
   private async fetchLinksWithBrowser(url: string): Promise<string[]> {
     if (!this.browser) {
       return [];
@@ -260,10 +225,7 @@ export abstract class BaseCrawler {
     }
   }
 
-  /**
-   * Saves the crawl results to a file
-   * @returns The crawl result
-   */
+  
   private saveResults(): CrawlResult {
     this.endTime = new Date();
     
