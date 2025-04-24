@@ -30,40 +30,13 @@ export const domains = [
   'https://nykaafashion.com/',
   'https://www.westside.com/',
   'https://www.virgio.com/',
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-
-
-  'https://www.tatacliq.com/'
+  'https://www.tatacliq.com/',
+  'https://www.myntra.com/',
+  'https://www.flipkart.com/',
+  'https://www.amazon.com/'
 ];
 
 export default {
   defaultConfig,
   domains
 };
-   
