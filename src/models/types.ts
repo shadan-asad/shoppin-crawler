@@ -12,6 +12,21 @@ export interface CrawledUrl {
 }
 
 // rsult of a crawl operation
+export interface CrawlState {
+  // The last successfully crawled URL
+  lastSuccessfulUrl: string;
+  // The last error encountered during crawling
+  lastError: Error | null;
+  // The number of blocked requests
+  blockedCount: number;
+  // The number of rate limit hits
+  rateLimitHits: number;
+  // The number of network errors
+  networkErrors: number;
+  // The number of timeout errors
+  timeoutErrors: number;
+}
+
 export interface CrawlResult {
   // The domain that was crawled
   domain: string;
@@ -25,6 +40,8 @@ export interface CrawlResult {
   endTime: Date;
   // Duration of the crawl in milliseconds
   duration: number;
+  // State information about the crawl
+  crawlState?: CrawlState;
 }
 
 // Represents a queue item for crawling
@@ -43,4 +60,6 @@ export interface ProductUrlPattern {
   pattern: RegExp;
   // Description of this pattern
   description: string;
+  // Priority of this pattern
+  priority: number;
 }

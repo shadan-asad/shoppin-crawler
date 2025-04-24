@@ -3,47 +3,43 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { CrawlerConfig, defaultConfig } from '../config/config';
 import logger from '../utils/logger';
-import { CrawlQueueItem, CrawlResult, CrawledUrl, ProductUrlPattern } from '../models/types';
+import { CrawlQueueItem, CrawlResult, CrawledUrl } from '../models/types';
 import { 
   normalizeUrl, 
   isSameDomain, 
   resolveUrl, 
-  isLikelyProductUrl,
-  commonProductUrlPatterns
+  isProductUrl
 } from '../utils/url-utils';
 import fs from 'fs';
 import path from 'path';
 
-
-export abstract class BaseCrawler {
+export class BaseCrawler {
   protected domain: string;
   protected config: CrawlerConfig;
   protected visitedUrls: Set<string> = new Set();
   protected productUrls: Set<string> = new Set();
   protected urlQueue: CrawlQueueItem[] = [];
   protected browser: Browser | null = null;
-  protected productUrlPatterns: ProductUrlPattern[] = commonProductUrlPatterns;
   protected startTime: Date | null = null;
   protected endTime: Date | null = null;
+  protected maxUrlsToCrawl = 100;
 
-  
+  private crawlState = {
+    lastSuccessfulUrl: '',
+    lastError: null as Error | null,
+    blockedCount: 0,
+    rateLimitHits: 0,
+    networkErrors: 0,
+    timeoutErrors: 0
+  };
+
   constructor(domain: string, config: CrawlerConfig = defaultConfig) {
     this.domain = domain;
     this.config = config;
-    
-    // Add domain-specific product URL patterns
-    this.initializeProductUrlPatterns();
   }
 
-  /**
-   * Initialize domain-specific product URL patterns
-   * This method should be overridden by subclasses to add domain-specific patterns
-   */
-  protected abstract initializeProductUrlPatterns(): void;
-
   protected isProductUrl(url: string): boolean {
-    // Check against all patterns
-    return this.productUrlPatterns.some(({ pattern }) => pattern.test(url));
+    return isProductUrl(url);
   }
 
   public async start(): Promise<CrawlResult> {
@@ -53,24 +49,15 @@ export abstract class BaseCrawler {
     // Initialize the queue with the domain URL
     this.urlQueue.push({ url: this.domain, depth: 0 });
 
-    // Initialize browser if needed
-    if (this.config.useHeadlessBrowser) {
-      this.browser = await puppeteer.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-      });
-    }
-
     try {
-      // Process the queue
+      // Initialize browser with retries if needed
+      if (this.config.useHeadlessBrowser) {
+        await this.initializeBrowser();
+      }
+
       await this.processQueue();
-      
-      // Save results
-      const result = this.saveResults();
-      
-      return result;
+      return this.saveResults();
     } finally {
-      // Close browser if it was opened
       if (this.browser) {
         await this.browser.close();
         this.browser = null;
@@ -78,31 +65,103 @@ export abstract class BaseCrawler {
     }
   }
 
-  
+  private async initializeBrowser(): Promise<void> {
+    let retryCount = 0;
+    const maxRetries = 3;
+    
+    while (retryCount < maxRetries) {
+      try {
+        this.browser = await puppeteer.launch({
+          headless: true,
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--window-size=1920,1080',
+            '--disable-accelerated-2d-canvas',
+            '--disable-gpu'
+          ],
+          defaultViewport: {
+            width: 1920,
+            height: 1080
+          }
+        });
+        break;
+      } catch (error) {
+        retryCount++;
+        if (retryCount === maxRetries) {
+          throw error;
+        }
+        logger.warn(`Browser launch failed, retrying (${retryCount}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+      }
+    }
+  }
+
+  private saveResults(): CrawlResult {
+    this.endTime = new Date();
+    
+    if (!fs.existsSync(this.config.outputPath)) {
+      fs.mkdirSync(this.config.outputPath, { recursive: true });
+    }
+    
+    const domainName = new URL(this.domain).hostname.replace(/\./g, '_');
+    const outputFile = path.join(this.config.outputPath, `${domainName}.json`);
+    
+    const result: CrawlResult = {
+      domain: this.domain,
+      productUrls: Array.from(this.productUrls),
+      totalUrlsCrawled: this.visitedUrls.size,
+      startTime: this.startTime!,
+      endTime: this.endTime,
+      duration: this.endTime.getTime() - this.startTime!.getTime(),
+      crawlState: this.crawlState
+    };
+    
+    fs.writeFileSync(outputFile, JSON.stringify(result, null, 2));
+    
+    this.logCrawlResults(result);
+    
+    return result;
+  }
+
+  private logCrawlResults(result: CrawlResult): void {
+    logger.info(`Crawler finished for domain: ${this.domain}`);
+    logger.info(`Found ${result.productUrls.length} product URLs`);
+    logger.info(`Crawled ${result.totalUrlsCrawled} URLs in ${result.duration}ms`);
+    
+    if (result.totalUrlsCrawled < this.maxUrlsToCrawl) {
+      logger.warn(`Crawler stopped early. Check crawlState for details: ${JSON.stringify(this.crawlState)}`);
+    }
+  }
+
   private async processQueue(): Promise<void> {
     const promises: Promise<void>[] = [];
-    const maxUrlsToCrawl = 200; // Set the maximum number of URLs to crawl
+    const maxTimeoutErrors = 10;
+    const maxNetworkErrors = 8;
+    const maxBlockedCount = 5;
 
-    while (this.urlQueue.length > 0 && this.visitedUrls.size < maxUrlsToCrawl) {
+    while (this.urlQueue.length > 0 && this.visitedUrls.size < this.maxUrlsToCrawl) {
+      if (this.shouldStopCrawling(maxTimeoutErrors, maxNetworkErrors, maxBlockedCount)) {
+        break;
+      }
+
       const batch = this.urlQueue.splice(0, this.config.concurrency);
+      promises.length = 0;
 
       for (const item of batch) {
         const normalizedUrl = normalizeUrl(item.url);
-        if (this.visitedUrls.has(normalizedUrl)) {
-          continue;
-        }
+        if (this.visitedUrls.has(normalizedUrl)) continue;
 
         this.visitedUrls.add(normalizedUrl);
-
-        const promise = this.processUrl(item).catch(error => {
-          logger.error(`Error processing URL ${item.url}: ${error.message}`);
-        });
-
-        promises.push(promise);
+        promises.push(this.processUrl(item).catch(error => {
+          this.handleCrawlError(error, item.url);
+        }));
       }
 
       await Promise.all(promises);
-      promises.length = 0;
 
       if (this.urlQueue.length > 0 && this.config.requestDelay > 0) {
         await new Promise(resolve => setTimeout(resolve, this.config.requestDelay));
@@ -110,61 +169,77 @@ export abstract class BaseCrawler {
     }
   }
 
-  private async processUrl(item: CrawlQueueItem): Promise<void> {
+  private shouldStopCrawling(maxTimeoutErrors: number, maxNetworkErrors: number, maxBlockedCount: number): boolean {
+    if (this.crawlState.networkErrors >= maxNetworkErrors) {
+      logger.error(`Crawler stopped early: Network errors. State: ${JSON.stringify(this.crawlState)}`);
+      return true;
+    }
+    if (this.crawlState.timeoutErrors >= maxTimeoutErrors) {
+      logger.error(`Crawler stopped early: Timeout errors. State: ${JSON.stringify(this.crawlState)}`);
+      return true;
+    }
+    if (this.crawlState.blockedCount >= maxBlockedCount) {
+      logger.error(`Crawler stopped early: Bot detection/blocking. State: ${JSON.stringify(this.crawlState)}`);
+      return true;
+    }
+    return false;
+  }
+
+  private async processUrl(item: CrawlQueueItem, retryCount = 0): Promise<void> {
     const { url, depth } = item;
+    const maxRetries = 2;
     
-    logger.debug(`Processing URL: ${url} (depth: ${depth})`);
-    
-    // Check if this is a product URL
-    if (this.isProductUrl(url)) {
-      logger.info(`Found product URL: ${url}`);
-      this.productUrls.add(url);
-    } else {
-      logger.debug(`Not a product URL: ${url}`);
-    }
-    
-    // Stop if we've reached the maximum depth
-    if (depth >= this.config.maxDepth) {
-      return;
-    }
-    
-    // Fetch the page content
-    let links: string[] = [];
-    
-    if (this.config.useHeadlessBrowser) {
-      links = await this.fetchLinksWithBrowser(url);
-    } else {
-      links = await this.fetchLinksWithAxios(url);
-    }
-    
-    // Process the links
-    for (const link of links) {
-      // Resolve relative URLs
-      const absoluteUrl = resolveUrl(link, url);
-      
-      // Skip if not from the same domain
-      if (!isSameDomain(absoluteUrl, this.domain)) {
-        continue;
+    try {
+      if (this.isProductUrl(url)) {
+        logger.info(`Found product URL: ${url}`);
+        this.productUrls.add(url);
       }
       
-      // Normalize the URL
-      const normalizedUrl = normalizeUrl(absoluteUrl);
+      if (depth >= this.config.maxDepth) return;
       
-      // Skip if we've already visited or queued this URL
-      if (this.visitedUrls.has(normalizedUrl)) {
-        continue;
+      const links = await this.fetchLinks(url);
+      this.processLinks(links, url, depth);
+      
+    } catch (error: any) {
+      if (this.shouldRetry(error, retryCount, maxRetries)) {
+        const delay = Math.pow(2, retryCount) * 1000;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return this.processUrl(item, retryCount + 1);
       }
-      
-      // Add to the queue
-      this.urlQueue.push({
-        url: normalizedUrl,
-        depth: depth + 1,
-        parentUrl: url
-      });
+      throw error;
     }
   }
 
-  
+  private shouldRetry(error: any, retryCount: number, maxRetries: number): boolean {
+    return error.message?.includes('timeout') && retryCount < maxRetries;
+  }
+
+  private processLinks(links: string[], sourceUrl: string, depth: number): void {
+    for (const link of links) {
+      try {
+        const absoluteUrl = resolveUrl(link, sourceUrl);
+        if (!isSameDomain(absoluteUrl, this.domain)) continue;
+        
+        const normalizedUrl = normalizeUrl(absoluteUrl);
+        if (this.visitedUrls.has(normalizedUrl)) continue;
+        
+        this.urlQueue.push({
+          url: normalizedUrl,
+          depth: depth + 1,
+          parentUrl: sourceUrl
+        });
+      } catch (error) {
+        logger.debug(`Error processing link ${link}: ${error}`);
+      }
+    }
+  }
+
+  private async fetchLinks(url: string): Promise<string[]> {
+    return this.config.useHeadlessBrowser ? 
+      this.fetchLinksWithBrowser(url) : 
+      this.fetchLinksWithAxios(url);
+  }
+
   private async fetchLinksWithAxios(url: string): Promise<string[]> {
     try {
       const response = await axios.get(url, {
@@ -177,7 +252,6 @@ export abstract class BaseCrawler {
       const $ = cheerio.load(response.data);
       const links: string[] = [];
       
-      // Extract links
       $('a').each((_, element) => {
         const href = $(element).attr('href');
         if (href) {
@@ -192,70 +266,119 @@ export abstract class BaseCrawler {
     }
   }
 
-  
   private async fetchLinksWithBrowser(url: string): Promise<string[]> {
     if (!this.browser) {
       return [];
     }
     
+    let page: Page | null = null;
     try {
-      const page = await this.browser.newPage();
+      page = await this.browser.newPage();
+      logger.debug(`Created new page for ${url}`);
       
-      // Set user agent
+      await page.setRequestInterception(true);
+      page.on('request', (request) => {
+        const resourceType = request.resourceType();
+        if (resourceType === 'document' || resourceType === 'script' || resourceType === 'xhr' || resourceType === 'fetch') {
+          request.continue();
+        } else {
+          request.abort();
+        }
+      });
+
+      page.on('console', msg => logger.debug(`Browser console: ${msg.text()}`));
+      page.on('pageerror', err => logger.debug(`Page error: ${err.message}`));
+
+      await page.setViewport({ width: 1920, height: 1080 });
       await page.setUserAgent(this.config.userAgent);
       
-      // Set timeout
-      page.setDefaultTimeout(this.config.timeout);
-      
-      // Navigate to the URL
-      await page.goto(url, { waitUntil: 'networkidle2' });
-      
-      // Extract links
-      const links = await page.evaluate(() => {
-        const anchors = Array.from(document.querySelectorAll('a'));
-        return anchors.map(anchor => anchor.href).filter(href => href);
+      logger.debug(`Navigating to ${url}`);
+      await page.goto(url, { 
+        waitUntil: ['domcontentloaded', 'networkidle0'],
+        timeout: 30000 
       });
+      logger.debug(`Initial page load complete for ${url}`);
+
+      await page.waitForFunction(() => {
+        return document.readyState === 'complete' && 
+               !!document.querySelector('a') &&
+               document.querySelectorAll('a[href]').length > 0;
+      }, { timeout: 10000 }).catch(() => {
+        logger.warn(`Timed out waiting for links on ${url}, continuing anyway`);
+      });
+
+      const links = await page.evaluate(() => {
+        const results = new Set<string>();
+        
+        document.querySelectorAll('a[href]').forEach(el => {
+          const href = el.getAttribute('href');
+          if (href && !href.startsWith('javascript:') && !href.startsWith('#')) {
+            results.add(href);
+          }
+        });
+        
+        const dataAttrs = ['data-url', 'data-href', 'data-link', 'data-product-url'];
+        document.querySelectorAll(`[${dataAttrs.join('], [')}]`).forEach(el => {
+          dataAttrs.forEach(attr => {
+            const value = el.getAttribute(attr);
+            if (value) results.add(value);
+          });
+        });
+        
+        document.querySelectorAll('[onclick]').forEach(el => {
+          const onclick = el.getAttribute('onclick');
+          if (onclick && onclick.includes('window.location')) {
+            const match = onclick.match(/window\.location(?:\.href)?\s*=\s*['"]([^'"]+)['"]/);
+            if (match) results.add(match[1]);
+          }
+        });
+
+        return Array.from(results);
+      });
+
+      logger.debug(`Found ${links.length} raw links on ${url}`);
+      
+      const processedLinks = links
+        .map(link => {
+          try {
+            return new URL(link, url).toString();
+          } catch {
+            return null;
+          }
+        })
+        .filter((link): link is string => 
+          link !== null && 
+          link.startsWith('http') && 
+          !link.includes('undefined')
+        );
+
+      logger.info(`Found ${processedLinks.length} valid links on ${url}`);
+      this.crawlState.lastSuccessfulUrl = url;
       
       await page.close();
+      return processedLinks;
       
-      return links;
     } catch (error) {
-      logger.error(`Error fetching ${url} with Puppeteer: ${error}`);
-      return [];
+      logger.error(`Error processing ${url}: ${error}`);
+      if (page) await page.close();
+      throw error;
     }
   }
 
-  
-  private saveResults(): CrawlResult {
-    this.endTime = new Date();
+  private handleCrawlError(error: Error, url: string): void {
+    this.crawlState.lastError = error;
     
-    // Create the output directory if it doesn't exist
-    if (!fs.existsSync(this.config.outputPath)) {
-      fs.mkdirSync(this.config.outputPath, { recursive: true });
+    if (error.message?.includes('timeout')) {
+      this.crawlState.timeoutErrors++;
+      logger.warn(`Timeout error for ${url}. Total timeouts: ${this.crawlState.timeoutErrors}`);
+    } else if (error.message?.includes('net::')) {
+      this.crawlState.networkErrors++;
+      logger.warn(`Network error for ${url}. Total network errors: ${this.crawlState.networkErrors}`);
+    } else if (error.message?.includes('blocked') || error.message?.includes('forbidden') || error.message?.includes('429')) {
+      this.crawlState.blockedCount++;
+      logger.warn(`Access blocked for ${url}. Total blocks: ${this.crawlState.blockedCount}`);
     }
-    
-    // Extract the domain name for the filename
-    const domainName = new URL(this.domain).hostname.replace(/\./g, '_');
-    const outputFile = path.join(this.config.outputPath, `${domainName}.json`);
-    
-    // Create the result object
-    const result: CrawlResult = {
-      domain: this.domain,
-      productUrls: Array.from(this.productUrls),
-      totalUrlsCrawled: this.visitedUrls.size,
-      startTime: this.startTime!,
-      endTime: this.endTime,
-      duration: this.endTime.getTime() - this.startTime!.getTime()
-    };
-    
-    // Write the result to a file
-    fs.writeFileSync(outputFile, JSON.stringify(result, null, 2));
-    
-    logger.info(`Crawler finished for domain: ${this.domain}`);
-    logger.info(`Found ${result.productUrls.length} product URLs`);
-    logger.info(`Crawled ${result.totalUrlsCrawled} URLs in ${result.duration}ms`);
-    logger.info(`Results saved to ${outputFile}`);
-    
-    return result;
+
+    logger.error(`Error processing URL ${url}: ${error.message}`);
   }
 }

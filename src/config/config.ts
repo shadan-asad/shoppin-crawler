@@ -16,23 +16,54 @@ export interface CrawlerConfig {
 }
 
 export const defaultConfig: CrawlerConfig = {
-  concurrency: 5,
-  maxDepth: 5,
-  requestDelay: 1000,
-  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-  timeout: 30000,
+  concurrency: 1, // Keep concurrency low to avoid rate limiting
+  maxDepth: 3,    // Increased depth to find more product pages
+  requestDelay: 2000, // Increased delay to avoid rate limiting
+  userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+  timeout: 30000,  // Increased timeout for slower sites
   outputPath: './output',
   useHeadlessBrowser: true,
 };
 
+// Start with less aggressive sites first
 export const domains = [
-  'https://www.virgio.com/',
-  'https://www.tatacliq.com/',
   'https://nykaafashion.com/',
-  'https://www.westside.com/'
+  'https://www.westside.com/',
+  'https://www.virgio.com/',
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  
+
+
+
+
+
+
+
+
+
+  'https://www.tatacliq.com/'
 ];
 
 export default {
   defaultConfig,
   domains
 };
+   
